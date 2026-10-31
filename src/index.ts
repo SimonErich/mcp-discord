@@ -1,9 +1,8 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import express from "express";
+import express, { Request, Response } from "express";
 import { Client, GatewayIntentBits } from "discord.js";
 
-// 1. Initialize Discord Client
 const discordClient = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -24,7 +23,6 @@ discordClient.once("ready", () => {
   console.log(`Discord bot is ready! Logged in as ${discordClient.user?.tag}`);
 });
 
-// 2. Initialize MCP Server instance
 const server = new Server(
   {
     name: "mcp-discord",
@@ -37,25 +35,18 @@ const server = new Server(
   }
 );
 
-// Define your MCP tools / prompts here
-// Example tool registration:
-// server.setRequestHandler(...)
-
-// 3. Set up Express HTTP Web Server for Dokploy / Traefik
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 let transport: SSEServerTransport | null = null;
 
-// Endpoint for establishing SSE connection
-app.get("/sse", async (req, res) => {
+app.get("/sse", async (req: Request, res: Response) => {
   console.log("New SSE connection received");
   transport = new SSEServerTransport("/message", res);
   await server.connect(transport);
 });
 
-// Endpoint for receiving client messages
-app.post("/message", async (req, res) => {
+app.post("/message", async (req: Request, res: Response) => {
   if (transport) {
     await transport.handlePostMessage(req, res);
   } else {
@@ -63,8 +54,7 @@ app.post("/message", async (req, res) => {
   }
 });
 
-// Health check endpoint for Dokploy
-app.get("/health", (req, res) => {
+app.get("/health", (req: Request, res: Response) => {
   res.status(200).send("OK");
 });
 
