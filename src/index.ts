@@ -1,31 +1,22 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import express, { Request, Response } from "express";
 import { Client, GatewayIntentBits } from "discord.js";
 
-// 1. Initialize Discord Client with required intents
 const discordClient = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
   ],
 });
 
 const token = process.env.DISCORD_TOKEN;
-if (!token) {
-  console.error("Error: DISCORD_TOKEN environment variable is missing.");
-  process.exit(1);
+if (token) {
+  discordClient.login(token);
 }
 
-discordClient.login(token);
-
-discordClient.once("ready", () => {
-  console.log(`Discord bot is ready! Logged in as ${discordClient.user?.tag}`);
-});
-
-// 2. Initialize MCP Server with proper capabilities
 const server = new Server(
   {
     name: "mcp-discord",
@@ -38,45 +29,81 @@ const server = new Server(
   }
 );
 
-// NOTE: If the original repo has a setup function for registering tools, import and call it here.
-// Example: import { registerTools } from "./tools.js"; registerTools(server, discordClient);
+// Define tools
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return {
+    tools: [
+      {
+        name: "ping_discord",
+        description: "Check if the Discord bot is online and reachable",
+        inputSchema: {
+          type: "object",
+          properties: {},
+        },
+      },
+    ],
+  };
+});
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  if (request.params.name === "ping_discord") {
+    const isReady = discordClient.isReady();
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Discord bot status: ${isReady ? "Ready" : "Disconnected"}`,
+        },
+      ],
+    };
+  }
+  throw new Error(`Tool not found: ${request.params.name}`);
+});
 
 const app = express();
+
+// 1. MUST include body parsers for JSON POST requests
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 const PORT = process.env.PORT || 3000;
 
-// Optional Bearer Token Authentication Middleware for Anthropic Vault
+// Auth Middleware
 app.use((req: Request, res: Response, next) => {
   if (req.path === "/health") return next();
-  
   const authHeader = req.headers.authorization;
   const expectedToken = process.env.MCP_BEARER_TOKEN || "jlABHidjfBWufdhfd88dffdGsgkfa";
-  
-  if (authHeader === `Bearer ${expectedToken}`) {
-    return next();
-  }
-  
+  if (authHeader === `Bearer ${expectedToken}`) return next();
   res.setHeader("WWW-Authenticate", 'Bearer realm="mcp"');
   return res.status(401).json({ error: "Unauthorized" });
 });
 
-let activeTransport: SSEServerTransport | null = null;
+// 2. Multi-session storage to map sessionId to its transport
+const transports = new Map<string, SSEServerTransport>();
 
 app.get("/sse", async (req: Request, res: Response) => {
   console.log("New MCP SSE connection handshake initiated");
-  try {
-    activeTransport = new SSEServerTransport("/message", res);
-    await server.connect(activeTransport);
-  } catch (error) {
-    console.error("Failed to connect MCP transport:", error);
-    res.status(500).send("MCP Handshake Failed");
-  }
+  
+  // Initialize SSE transport specifying the post endpoint path
+  const transport = new SSEServerTransport("/message", res);
+  transports.set(transport.sessionId, transport);
+
+  transport.onclose = () => {
+    transports.delete(transport.sessionId);
+  };
+
+  await server.connect(transport);
 });
 
 app.post("/message", async (req: Request, res: Response) => {
-  if (activeTransport) {
-    await activeTransport.handlePostMessage(req, res);
+  const sessionId = req.query.sessionId as string;
+  const transport = transports.get(sessionId);
+
+  if (transport) {
+    // Pass req.body as the 3rd argument if req body stream has been parsed
+    await transport.handlePostMessage(req, res, req.body);
   } else {
-    res.status(400).send("No active SSE session found for message handling.");
+    res.status(400).send(`Session not found: ${sessionId}`);
   }
 });
 
