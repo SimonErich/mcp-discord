@@ -15,5 +15,5 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/build ./build
 USER node
-# MCP over stdio: run with `docker run -i`
+EXPOSE 3000
 ENTRYPOINT ["node", "build/index.js"]
