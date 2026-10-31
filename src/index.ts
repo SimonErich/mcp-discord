@@ -3,7 +3,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import express, { Request, Response } from "express";
-import { Client, GatewayIntentBits } from "discord.js";
+import { Client, GatewayIntentBits, type TextBasedChannel } from "discord.js";
 
 const discordClient = new Client({
   intents: [
@@ -18,6 +18,103 @@ if (token) {
   discordClient.login(token);
 }
 
+const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
+
+const str = (description: string) => ({ type: "string", description });
+const TOOLS = [
+  {
+    name: "ping_discord",
+    description: "Check if the Discord bot is online and reachable",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_channels",
+    description: "List guilds the bot is in and their text channels (id, name). Use to find a channel_id.",
+    inputSchema: { type: "object", properties: { guild_id: str("Optional: only this guild") } },
+  },
+  {
+    name: "send_message",
+    description: "Send a message to a Discord text channel.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: str("Target channel ID"),
+        content: str("Message text (max 2000 chars)"),
+        reply_to: str("Optional message ID to reply to"),
+      },
+      required: ["channel_id", "content"],
+    },
+  },
+  {
+    name: "read_messages",
+    description: "Read the most recent messages of a text channel.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: str("Channel ID"),
+        limit: { type: "number", description: "1-100, default 20" },
+      },
+      required: ["channel_id"],
+    },
+  },
+];
+
+async function textChannel(id: unknown): Promise<TextBasedChannel> {
+  if (typeof id !== "string" || !id) throw new Error("channel_id is required");
+  if (!discordClient.isReady()) throw new Error("Discord bot is not connected (check DISCORD_TOKEN)");
+  const ch = await discordClient.channels.fetch(id);
+  if (!ch || !ch.isTextBased()) throw new Error(`Channel ${id} not found or not a text channel`);
+  return ch;
+}
+
+async function callTool(name: string, a: Record<string, any>): Promise<string> {
+  switch (name) {
+    case "ping_discord":
+      return `Discord bot status: ${discordClient.isReady() ? "Ready" : "Disconnected"}`;
+    case "list_channels": {
+      if (!discordClient.isReady()) throw new Error("Discord bot is not connected (check DISCORD_TOKEN)");
+      const guilds = [...discordClient.guilds.cache.values()].filter((g) => !a.guild_id || g.id === a.guild_id);
+      return JSON.stringify(
+        guilds.map((g) => ({
+          guild: { id: g.id, name: g.name },
+          channels: [...g.channels.cache.values()]
+            .filter((c) => c.isTextBased() && !c.isThread())
+            .map((c) => ({ id: c.id, name: c.name })),
+        })),
+        null,
+        2
+      );
+    }
+    case "send_message": {
+      const ch = await textChannel(a.channel_id);
+      if (!("send" in ch)) throw new Error("Channel does not support sending");
+      if (typeof a.content !== "string" || !a.content) throw new Error("content is required");
+      const msg = await ch.send({
+        content: a.content.slice(0, 2000),
+        ...(a.reply_to ? { reply: { messageReference: String(a.reply_to) } } : {}),
+      });
+      return `Sent message ${msg.id} to channel ${a.channel_id}`;
+    }
+    case "read_messages": {
+      const ch = await textChannel(a.channel_id);
+      const limit = Math.min(Math.max(Number(a.limit) || 20, 1), 100);
+      const msgs = await ch.messages.fetch({ limit });
+      return JSON.stringify(
+        [...msgs.values()].reverse().map((m) => ({
+          id: m.id,
+          author: m.author.username,
+          content: m.content,
+          timestamp: m.createdAt.toISOString(),
+        })),
+        null,
+        2
+      );
+    }
+    default:
+      throw new Error(`Tool not found: ${name}`);
+  }
+}
+
 // A Server instance can only be bound to ONE transport at a time. Connecting a
 // shared instance to a second transport silently replaces the first, so earlier
 // sessions lose their response channel. Hence: one Server per connection.
@@ -28,28 +125,15 @@ function createServer(): Server {
   );
 
   // Initialize is handled by the SDK itself; only tool handlers are registered.
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
-      {
-        name: "ping_discord",
-        description: "Check if the Discord bot is online and reachable",
-        inputSchema: { type: "object", properties: {} },
-      },
-    ],
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    if (request.params.name === "ping_discord") {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Discord bot status: ${discordClient.isReady() ? "Ready" : "Disconnected"}`,
-          },
-        ],
-      };
+    const args = (request.params.arguments ?? {}) as Record<string, any>;
+    try {
+      return text(await callTool(request.params.name, args));
+    } catch (err) {
+      return { isError: true, ...text(`Error: ${err instanceof Error ? err.message : String(err)}`) };
     }
-    throw new Error(`Tool not found: ${request.params.name}`);
   });
 
   return server;
