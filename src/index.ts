@@ -1,6 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { ListToolsRequestSchema, CallToolRequestSchema, InitializeRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import express, { Request, Response } from "express";
 import { Client, GatewayIntentBits } from "discord.js";
 
@@ -61,8 +61,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 const app = express();
-
-// 1. MUST include body parsers for JSON POST requests
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -78,32 +76,42 @@ app.use((req: Request, res: Response, next) => {
   return res.status(401).json({ error: "Unauthorized" });
 });
 
-// 2. Multi-session storage to map sessionId to its transport
 const transports = new Map<string, SSEServerTransport>();
 
 app.get("/sse", async (req: Request, res: Response) => {
   console.log("New MCP SSE connection handshake initiated");
   
-  // Initialize SSE transport specifying the post endpoint path
   const transport = new SSEServerTransport("/message", res);
   transports.set(transport.sessionId, transport);
 
   transport.onclose = () => {
+    console.log(`Transport closed for session: ${transport.sessionId}`);
     transports.delete(transport.sessionId);
   };
 
-  await server.connect(transport);
+  try {
+    await server.connect(transport);
+  } catch (err) {
+    console.error("Error connecting server to transport:", err);
+  }
 });
 
 app.post("/message", async (req: Request, res: Response) => {
   const sessionId = req.query.sessionId as string;
   const transport = transports.get(sessionId);
 
-  if (transport) {
-    // Pass req.body as the 3rd argument if req body stream has been parsed
+  if (!transport) {
+    console.error(`Session not found for ID: ${sessionId}`);
+    return res.status(400).send(`Session not found: ${sessionId}`);
+  }
+
+  try {
     await transport.handlePostMessage(req, res, req.body);
-  } else {
-    res.status(400).send(`Session not found: ${sessionId}`);
+  } catch (error) {
+    console.error("Error handling POST message:", error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Internal server error handling message" });
+    }
   }
 });
 
