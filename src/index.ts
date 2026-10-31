@@ -3,11 +3,13 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express, { Request, Response } from "express";
 import { Client, GatewayIntentBits } from "discord.js";
 
+// 1. Initialize Discord Client with required intents
 const discordClient = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
   ],
 });
 
@@ -23,6 +25,7 @@ discordClient.once("ready", () => {
   console.log(`Discord bot is ready! Logged in as ${discordClient.user?.tag}`);
 });
 
+// 2. Initialize MCP Server with proper capabilities
 const server = new Server(
   {
     name: "mcp-discord",
@@ -35,10 +38,13 @@ const server = new Server(
   }
 );
 
+// NOTE: If the original repo has a setup function for registering tools, import and call it here.
+// Example: import { registerTools } from "./tools.js"; registerTools(server, discordClient);
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Optional Bearer Token Validation Middleware matching Anthropic Vault
+// Optional Bearer Token Authentication Middleware for Anthropic Vault
 app.use((req: Request, res: Response, next) => {
   if (req.path === "/health") return next();
   
@@ -49,12 +55,10 @@ app.use((req: Request, res: Response, next) => {
     return next();
   }
   
-  // If unauthorized, return 401 with standard header challenge
   res.setHeader("WWW-Authenticate", 'Bearer realm="mcp"');
   return res.status(401).json({ error: "Unauthorized" });
 });
 
-// Store active SSE transports by session ID or globally for single-tenant
 let activeTransport: SSEServerTransport | null = null;
 
 app.get("/sse", async (req: Request, res: Response) => {
