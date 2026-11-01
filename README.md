@@ -1,157 +1,104 @@
-# Discord MCP Server
+# Discord MCP server
 
-A Model Context Protocol (MCP) server that enables LLMs to interact with Discord channels, allowing them to send and read messages through Discord's API. Using this server, LLMs like Claude can directly interact with Discord channels while maintaining user control and security.
+Authenticated HTTP MCP service for Discord. Node 20+ and a Discord bot with View
+Channel, Read Message History and Message Content access are required. Sending
+also requires Send Messages permission.
 
-## Features
+## Run
 
-- Send messages to Discord channels
-- Read recent messages from channels
-- Automatic server and channel discovery
-- Support for both channel names and IDs
-- Proper error handling and validation
-
-## Prerequisites
-
-- Node.js 16.x or higher
-- A Discord bot token
-- The bot must be invited to your server with proper permissions:
-  - Read Messages/View Channels
-  - Send Messages
-  - Read Message History
-
-## Setup
-
-1. Clone this repository:
-```bash
-git clone https://github.com/yourusername/discordmcp.git
-cd discordmcp
-```
-
-2. Install dependencies:
-```bash
-npm install
-```
-
-3. Create a `.env` file in the root directory with your Discord bot token:
-```
-DISCORD_TOKEN=your_discord_bot_token_here
-```
-
-4. Build the server:
-```bash
+```sh
+npm ci
 npm run build
+node --env-file=.env build/index.js
 ```
 
-## Usage with Claude for Desktop
+Configure `DISCORD_TOKEN`, `MCP_BEARER_TOKEN`, and optionally `PORT` (default 3000).
+The service refuses to start without an MCP Bearer token. Do not put secrets in
+URLs, source files or logs. Docker receives secrets through environment variables;
+it runs as the non-root `node` user.
 
-1. Open your Claude for Desktop configuration file:
-   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- `POST /mcp`: stateless Streamable HTTP, the recommended application endpoint.
+- `GET /sse` and `POST /message?sessionId=…`: legacy SSE clients.
+- `GET /health`: public liveness only.
 
-2. Add the Discord MCP server configuration:
+MCP requests require `Authorization: Bearer <MCP_BEARER_TOKEN>`. URL username/password
+Basic authentication is not supported. Use an HTTPS reverse proxy when hosting.
+This server does not implement stdio transport.
+
+## Tools
+
+Existing tools retain their contracts:
+
+- `ping_discord`: bot connectivity status.
+- `list_channels`: guild and text-channel names/IDs; optional `guild_id`.
+- `read_messages`: recent compact text messages, default 20, maximum 100. This
+  legacy tool is not a complete history export.
+- `send_message`: explicit channel/content and optional reply target. This task
+  did not change its behavior or send any messages; consumers must separately
+  control posting authority and mention handling.
+
+Two opt-in tools support complete, bounded collection:
+
+### `get_channel`
+
+Requires `guild_id` and `channel_id`. Returns freshly fetched `id`, `guild_id`,
+`name` and `type`. Only standard guild text and announcement channels are accepted.
+A mismatched guild is rejected before message retrieval.
+
+### `read_messages_page`
+
 ```json
 {
-  "mcpServers": {
-    "discord": {
-      "command": "node",
-      "args": ["path/to/discordmcp/build/index.js"],
-      "env": {
-        "DISCORD_TOKEN": "your_discord_bot_token_here"
-      }
-    }
-  }
+  "guild_id": "123456789012345678",
+  "channel_id": "223456789012345678",
+  "since": "2026-10-25T12:00:00Z",
+  "until": "2026-11-01T12:00:00Z",
+  "limit": 20,
+  "max_bytes": 32768
 }
 ```
 
-3. Restart Claude for Desktop
+Use current timestamps: an interval may span at most seven days plus one hour,
+start no earlier than eight days ago, and end no more than five minutes in the
+future. The extra hour supports a weekly digest crossing a boundary, not an
+archive backfill. Invalid dates, limits, IDs or escaped cursors fail before
+message IO. The example dates above are illustrative, not a permanent query.
 
-## Available Tools
+Each call fetches **one page only**, default 20 messages, hard maximum 50. Results
+are newest first. `max_bytes` limits the complete serialized JSON response to
+32 KiB by default (2–64 KiB allowed). Messages include stable author IDs, content,
+edit timestamps, embeds, attachment metadata and reply references. Attachment
+bodies are never downloaded. Messages outside the interval are not returned.
 
-### send-message
-Sends a message to a specified Discord channel.
+The result contains `channel`, `messages`, `complete`, `next_before` and
+`stop_reason` (`page`, `bytes`, `history`, or `window`). When `complete` is false,
+pass `next_before` as `before` with the same interval to request another page.
+A byte boundary retains whole messages; a single message that cannot fit produces
+an explicit error. Empty user/reply messages without embeds or attachments are
+rejected because missing Message Content permission can masquerade as empty data.
 
-Parameters:
-- `server` (optional): Server name or ID (required if bot is in multiple servers)
-- `channel`: Channel name (e.g., "general") or ID
-- `message`: Message content to send
+Clients must impose their own total page/message/byte budgets and must never
+interpret a limited page as a complete digest. The server never recursively reads
+history and never sends content to an LLM. For AI tools, inspect metadata first,
+request small windows, and avoid loading unnecessary old message bodies into context.
 
-Example:
-```json
-{
-  "channel": "general",
-  "message": "Hello from MCP!"
-}
+## Tests and local image
+
+```sh
+npm test
+docker build -t discord-mcp:bounded-history .
 ```
 
-### read-messages
-Reads recent messages from a specified Discord channel.
+Tests use synthetic messages and an isolated HTTP fixture server without a Discord
+bot token. They cover pagination, provenance, byte budgets, old/future windows,
+guild identity, duplicate cursors, content permission and the authenticated MCP
+transport. A network-isolated, read-only production image was also verified locally.
+No real Discord history, send operation or paid AI request is part of these checks.
 
-Parameters:
-- `server` (optional): Server name or ID (required if bot is in multiple servers)
-- `channel`: Channel name (e.g., "general") or ID
-- `limit` (optional): Number of messages to fetch (default: 50, max: 100)
+The reader extension is prepared in this checkout. Rebuild/redeploy the hosted
+service separately to expose `get_channel` and `read_messages_page`. Consumers
+should verify those tool names before enabling automatic collection; do not fall
+back silently to `read_messages`.
 
-Example:
-```json
-{
-  "channel": "general",
-  "limit": 10
-}
-```
-
-## Development
-
-1. Install development dependencies:
-```bash
-npm install --save-dev typescript @types/node
-```
-
-2. Start the server in development mode:
-```bash
-npm run dev
-```
-
-## Testing
-
-You can test the server using the MCP Inspector:
-
-```bash
-npx @modelcontextprotocol/inspector node build/index.js
-```
-
-## Examples
-
-Here are some example interactions you can try with Claude after setting up the Discord MCP server:
-
-1. "Can you read the last 5 messages from the general channel?"
-2. "Please send a message to the announcements channel saying 'Meeting starts in 10 minutes'"
-3. "What were the most recent messages in the development channel about the latest release?"
-
-Claude will use the appropriate tools to interact with Discord while asking for your approval before sending any messages.
-
-## Security Considerations
-
-- The bot requires proper Discord permissions to function
-- All message sending operations require explicit user approval
-- Environment variables should be properly secured
-- Token should never be committed to version control
-- Channel access is limited to channels the bot has been given access to
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Support
-
-If you encounter any issues or have questions:
-1. Check the GitHub Issues section
-2. Consult the MCP documentation at https://modelcontextprotocol.io
-3. Open a new issue with detailed reproduction steps
+Protocol references: [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)
+and [initialization](https://modelcontextprotocol.io/specification/2025-03-26/basic/lifecycle).

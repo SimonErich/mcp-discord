@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import express, { Request, Response } from "express";
 import { Client, GatewayIntentBits, type TextBasedChannel } from "discord.js";
+import { createHistoryReader, HISTORY_TOOLS } from "./history.js";
 
 const discordClient = new Client({
   intents: [
@@ -22,6 +23,7 @@ const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
 const str = (description: string) => ({ type: "string", description });
 const TOOLS = [
+  ...HISTORY_TOOLS,
   {
     name: "ping_discord",
     description: "Check if the Discord bot is online and reachable",
@@ -59,6 +61,33 @@ const TOOLS = [
   },
 ];
 
+async function historyChannel(id: string) {
+  if (!discordClient.isReady()) throw new Error("Discord bot is not connected");
+  const ch = await discordClient.channels.fetch(id, { force: true, cache: false });
+  if (!ch || !ch.isTextBased() || !('guildId' in ch) || ![0, 5].includes(ch.type))
+    throw new Error("Expected a guild text or announcement channel");
+  return ch;
+}
+const history = createHistoryReader({
+  channel: async (id) => {
+    const ch = await historyChannel(id);
+    return { id: ch.id, guild_id: ch.guildId, name: ch.name, type: ch.type };
+  },
+  messages: async (id, options) => {
+    const ch = await historyChannel(id);
+    const messages = await ch.messages.fetch({ ...options, cache: false });
+    return [...messages.values()].map((message) => ({
+      id: message.id, channel_id: message.channelId, guild_id: ch.guildId,
+      author: { id: message.author.id, username: message.author.username },
+      content: message.content, timestamp: message.createdAt.toISOString(),
+      edited_timestamp: message.editedAt?.toISOString() ?? null, type: message.type,
+      embeds: message.embeds.map((embed) => embed.toJSON()),
+      attachments: [...message.attachments.values()].map((a) => ({ id: a.id, filename: a.name, url: a.url })),
+      ...(message.reference ? { message_reference: { message_id: message.reference.messageId } } : {}),
+    }));
+  },
+});
+
 async function textChannel(id: unknown): Promise<TextBasedChannel> {
   if (typeof id !== "string" || !id) throw new Error("channel_id is required");
   if (!discordClient.isReady()) throw new Error("Discord bot is not connected (check DISCORD_TOKEN)");
@@ -69,6 +98,10 @@ async function textChannel(id: unknown): Promise<TextBasedChannel> {
 
 async function callTool(name: string, a: Record<string, any>): Promise<string> {
   switch (name) {
+    case "get_channel":
+      return JSON.stringify(await history.channel(a));
+    case "read_messages_page":
+      return JSON.stringify(await history.read(a));
     case "ping_discord":
       return `Discord bot status: ${discordClient.isReady() ? "Ready" : "Disconnected"}`;
     case "list_channels": {
